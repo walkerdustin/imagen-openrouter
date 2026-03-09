@@ -97,103 +97,12 @@ const state = {
     references: [], // Dynamic array - unlimited references
     images: [], // Will be loaded from IndexedDB
     currentImage: null,
-    pendingBatches: [] // Track pending generation batches { id, prompt, count, completed, failed }
+    pendingBatches: [], // Track pending generation batches { id, prompt, count, completed, failed }
+    availableModels: []
 };
 
 // ===== Model Configurations =====
-const MODEL_CONFIGS = {
-    'google/gemini-2.5-flash-image': {
-        name: 'Gemini 2.5 Flash Image',
-        supportsImageSize: true,
-        supportsAspectRatio: true,
-        supportsImageInput: true,
-        maxReferences: 3
-    },
-    'google/gemini-2.5-flash-image-preview': {
-        name: 'Gemini 2.5 Flash Image (Preview)',
-        supportsImageSize: true,
-        supportsAspectRatio: true,
-        supportsImageInput: true,
-        maxReferences: 3
-    },
-    'google/gemini-3-pro-image-preview': {
-        name: 'Gemini 3 Pro Image (Preview)',
-        supportsImageSize: true,
-        supportsAspectRatio: true,
-        supportsImageInput: true,
-        maxReferences: 14
-    },
-    'openai/gpt-5-image': {
-        name: 'GPT-5 Image',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: true,
-        maxReferences: 1
-    },
-    'openai/gpt-5-image-mini': {
-        name: 'GPT-5 Image Mini',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: true,
-        maxReferences: 1
-    },
-    'black-forest-labs/flux.2-pro': {
-        name: 'Flux 2 Pro',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    },
-    'black-forest-labs/flux.2-max': {
-        name: 'Flux 2 Max',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    },
-    'black-forest-labs/flux.2-flex': {
-        name: 'Flux 2 Flex',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    },
-    'black-forest-labs/flux.2-klein-4b': {
-        name: 'Flux 2 Klein 4B',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    },
-    'bytedance-seed/seedream-4.5': {
-        name: 'Seedream 4.5',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    },
-    'sourceful/riverflow-v2-fast-preview': {
-        name: 'Riverflow V2 Fast',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    },
-    'sourceful/riverflow-v2-standard-preview': {
-        name: 'Riverflow V2 Standard',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    },
-    'sourceful/riverflow-v2-max-preview': {
-        name: 'Riverflow V2 Max',
-        supportsImageSize: false,
-        supportsAspectRatio: true,
-        supportsImageInput: false,
-        maxReferences: 0
-    }
-};
+let MODEL_CONFIGS = {};
 
 // ===== DOM Elements =====
 const elements = {
@@ -240,16 +149,6 @@ async function init() {
     // Render reference slots
     renderReferenceSlots();
 
-    // Restore saved model selection
-    if (state.selectedModel) {
-        const savedOption = document.querySelector(`.custom-select-option[data-value="${state.selectedModel}"]`);
-        if (savedOption) {
-            document.querySelectorAll('.custom-select-option').forEach(o => o.classList.remove('selected'));
-            savedOption.classList.add('selected');
-            elements.modelSelectValue.textContent = savedOption.textContent;
-        }
-    }
-
     // Restore saved image quality/size
     document.querySelectorAll('.btn-toggle').forEach(btn => {
         btn.classList.remove('active');
@@ -285,8 +184,8 @@ async function init() {
     // Set up event listeners
     setupEventListeners();
 
-    // Initialize UI state
-    updateGeminiOptionsVisibility();
+    // Load models from OpenRouter and initialize model UI
+    await refreshAvailableModels();
 }
 
 // ===== Event Listeners =====
@@ -296,17 +195,12 @@ function setupEventListeners() {
         elements.modelSelectContainer.classList.toggle('open');
     });
 
-    // Custom dropdown - option selection
-    document.querySelectorAll('.custom-select-option').forEach(option => {
-        option.addEventListener('click', () => {
-            state.selectedModel = option.dataset.value;
-            localStorage.setItem('imagen_model', state.selectedModel);
-            elements.modelSelectValue.textContent = option.textContent;
-            document.querySelectorAll('.custom-select-option').forEach(o => o.classList.remove('selected'));
-            option.classList.add('selected');
-            elements.modelSelectContainer.classList.remove('open');
-            updateGeminiOptionsVisibility();
-        });
+    // Custom dropdown - option selection (event delegation for dynamic options)
+    elements.modelSelectOptions.addEventListener('click', (e) => {
+        const option = e.target.closest('.custom-select-option');
+        if (!option || option.dataset.disabled === 'true') return;
+        setSelectedModel(option.dataset.value, true);
+        elements.modelSelectContainer.classList.remove('open');
     });
 
     // Close dropdown when clicking outside
@@ -371,10 +265,11 @@ function setupEventListeners() {
     }
 
     // API Key
-    elements.saveApiKey.addEventListener('click', () => {
+    elements.saveApiKey.addEventListener('click', async () => {
         state.apiKey = elements.apiKey.value.trim();
         localStorage.setItem('imagen_api_key', state.apiKey);
         showToast('API key saved!', 'success');
+        await refreshAvailableModels({ showSuccessToast: true });
     });
 
     // Reference images are handled by renderReferenceSlots()
@@ -435,6 +330,135 @@ function setupEventListeners() {
             }
         }
     });
+}
+
+function isImageOutputModel(model) {
+    const outputModalities = model?.architecture?.output_modalities;
+    return Array.isArray(outputModalities) && outputModalities.includes('image');
+}
+
+function buildModelConfig(model) {
+    const id = model.id || '';
+    const inputModalities = model?.architecture?.input_modalities || [];
+    const isGemini = id.includes('gemini');
+
+    return {
+        id: id,
+        name: model.name || id,
+        supportsImageSize: isGemini,
+        supportsAspectRatio: true,
+        supportsImageInput: inputModalities.includes('image'),
+        maxReferences: isGemini && id.includes('gemini-3-pro') ? 14 : (inputModalities.includes('image') ? 1 : 0)
+    };
+}
+
+function renderModelOptions(models) {
+    elements.modelSelectOptions.innerHTML = '';
+
+    if (!models || models.length === 0) {
+        setModelOptionsMessage('No image output models found');
+        return;
+    }
+
+    models.forEach((model) => {
+        const option = document.createElement('div');
+        option.className = 'custom-select-option';
+        option.dataset.value = model.id;
+        option.textContent = model.name;
+        elements.modelSelectOptions.appendChild(option);
+    });
+}
+
+function setModelOptionsMessage(message) {
+    elements.modelSelectOptions.innerHTML = '';
+    const option = document.createElement('div');
+    option.className = 'custom-select-option';
+    option.dataset.disabled = 'true';
+    option.textContent = message;
+    elements.modelSelectOptions.appendChild(option);
+}
+
+function setSelectedModel(modelId, persist = false) {
+    const option = document.querySelector(`.custom-select-option[data-value="${modelId}"]`);
+    if (!option) return false;
+
+    state.selectedModel = modelId;
+    if (persist) {
+        localStorage.setItem('imagen_model', state.selectedModel);
+    }
+
+    elements.modelSelectValue.textContent = option.textContent.trim();
+    document.querySelectorAll('.custom-select-option').forEach(o => o.classList.remove('selected'));
+    option.classList.add('selected');
+    updateGeminiOptionsVisibility();
+    return true;
+}
+
+async function refreshAvailableModels({ showSuccessToast = false } = {}) {
+    if (!state.apiKey) {
+        MODEL_CONFIGS = {};
+        state.availableModels = [];
+        state.selectedModel = '';
+        elements.modelSelectValue.textContent = 'Save API key to load models';
+        setModelOptionsMessage('Save API key to load models');
+        updateGeminiOptionsVisibility();
+        return;
+    }
+
+    setModelOptionsMessage('Loading models...');
+
+    try {
+        const response = await fetch('https://openrouter.ai/api/v1/models', {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${state.apiKey}`
+            }
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error?.message || `Failed to load models (${response.status})`);
+        }
+
+        const data = await response.json();
+        const rawModels = Array.isArray(data?.data) ? data.data : [];
+        const imageModels = rawModels
+            .filter(isImageOutputModel)
+            .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+
+        MODEL_CONFIGS = {};
+        state.availableModels = imageModels.map((model) => {
+            const config = buildModelConfig(model);
+            MODEL_CONFIGS[config.id] = config;
+            return config;
+        });
+
+        renderModelOptions(state.availableModels);
+
+        const hasSavedModel = Boolean(state.selectedModel && MODEL_CONFIGS[state.selectedModel]);
+        const nextModelId = hasSavedModel ? state.selectedModel : state.availableModels[0]?.id;
+
+        if (nextModelId) {
+            setSelectedModel(nextModelId, true);
+        } else {
+            state.selectedModel = '';
+            elements.modelSelectValue.textContent = 'No image models available';
+            setModelOptionsMessage('No image output models found');
+            updateGeminiOptionsVisibility();
+        }
+
+        if (showSuccessToast) {
+            showToast(`Loaded ${state.availableModels.length} image model(s)`, 'success');
+        }
+    } catch (error) {
+        console.error('Failed to load available models:', error);
+        MODEL_CONFIGS = {};
+        state.availableModels = [];
+        elements.modelSelectValue.textContent = 'Failed to load models';
+        setModelOptionsMessage('Failed to load models');
+        updateGeminiOptionsVisibility();
+        showToast(`Could not load models: ${error.message}`, 'error');
+    }
 }
 
 // ===== Paste Handler =====
@@ -607,6 +631,10 @@ async function generateImages() {
     }
 
     const modelConfig = MODEL_CONFIGS[state.selectedModel];
+    if (!state.selectedModel || !modelConfig) {
+        showToast('Please load and select an image model', 'warning');
+        return;
+    }
     const currentReferences = state.references.length > 0 ? [...state.references] : [];
     const currentModel = state.selectedModel;
     const currentSize = state.imageSize;
@@ -724,8 +752,7 @@ async function generateSingleImage(prompt, modelConfig) {
                 role: 'user',
                 content: content.length === 1 ? prompt : content
             }
-        ],
-        modalities: modelConfig.modalities
+        ]
     };
 
     // Add Gemini-specific options
@@ -1186,16 +1213,10 @@ function recreateImageByIndex(index) {
     elements.promptInput.value = image.prompt;
     elements.charCount.textContent = `${image.prompt.length} chars`;
 
-    // Restore model using custom select
-    state.selectedModel = image.model;
-    localStorage.setItem('imagen_model', state.selectedModel);
-    const modelOption = document.querySelector(`.custom-select-option[data-value="${image.model}"]`);
-    if (modelOption) {
-        document.querySelectorAll('.custom-select-option').forEach(o => o.classList.remove('selected'));
-        modelOption.classList.add('selected');
-        elements.modelSelectValue.textContent = modelOption.textContent;
+    // Restore model if currently available
+    if (!setSelectedModel(image.model, true)) {
+        showToast('Saved model is no longer available. Keeping current model.', 'warning');
     }
-    updateGeminiOptionsVisibility();
 
     // Restore quality/size
     document.querySelectorAll('.btn-toggle').forEach(btn => {
@@ -1263,16 +1284,10 @@ function recreateImage() {
     elements.promptInput.value = state.currentImage.prompt;
     elements.charCount.textContent = `${state.currentImage.prompt.length} chars`;
 
-    // Restore model using custom select
-    state.selectedModel = state.currentImage.model;
-    localStorage.setItem('imagen_model', state.selectedModel);
-    const modelOption = document.querySelector(`.custom-select-option[data-value="${state.currentImage.model}"]`);
-    if (modelOption) {
-        document.querySelectorAll('.custom-select-option').forEach(o => o.classList.remove('selected'));
-        modelOption.classList.add('selected');
-        elements.modelSelectValue.textContent = modelOption.textContent;
+    // Restore model if currently available
+    if (!setSelectedModel(state.currentImage.model, true)) {
+        showToast('Saved model is no longer available. Keeping current model.', 'warning');
     }
-    updateGeminiOptionsVisibility();
 
     // Restore quality/size
     document.querySelectorAll('.btn-toggle').forEach(btn => {
@@ -1323,7 +1338,7 @@ function downloadCurrentImage() {
 
 // ===== UI Helpers =====
 function updateGeminiOptionsVisibility() {
-    const isGemini = state.selectedModel.includes('gemini');
+    const isGemini = Boolean(state.selectedModel && state.selectedModel.includes('gemini'));
     elements.geminiOptions.style.display = isGemini ? 'flex' : 'none';
 }
 
