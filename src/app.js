@@ -332,24 +332,71 @@ function setupEventListeners() {
     });
 }
 
-function isImageOutputModel(model) {
-    const outputModalities = model?.architecture?.output_modalities;
-    return Array.isArray(outputModalities) && outputModalities.includes('image');
-}
-
 function buildModelConfig(model) {
     const id = model.id || '';
-    const inputModalities = model?.architecture?.input_modalities || [];
+    const lowerId = id.toLowerCase();
     const isGemini = id.includes('gemini');
+    const supportsImageInput = isGemini || lowerId.startsWith('openai/gpt-5-image');
 
     return {
         id: id,
         name: model.name || id,
         supportsImageSize: isGemini,
         supportsAspectRatio: true,
-        supportsImageInput: inputModalities.includes('image'),
-        maxReferences: isGemini && id.includes('gemini-3-pro') ? 14 : (inputModalities.includes('image') ? 1 : 0)
+        supportsImageInput: supportsImageInput,
+        maxReferences: isGemini && id.includes('gemini-3-pro') ? 14 : (supportsImageInput ? 1 : 0)
     };
+}
+
+function isRssImageOutputModel(model) {
+    const searchable = `${model.name || ''} ${model.description || ''}`.toLowerCase();
+    const imageSignals = [
+        'text-to-image',
+        'image generation',
+        'image editing',
+        'image model',
+        'image output',
+        'generate images',
+        'generating images',
+        'megapixel'
+    ];
+    return imageSignals.some((signal) => searchable.includes(signal));
+}
+
+function parseModelsFromRss(rssText) {
+    const xml = new DOMParser().parseFromString(rssText, 'application/xml');
+    if (xml.querySelector('parsererror')) {
+        throw new Error('Invalid RSS payload');
+    }
+
+    const items = Array.from(xml.querySelectorAll('item'));
+    const models = [];
+    const seen = new Set();
+
+    items.forEach((item) => {
+        const guid = item.querySelector('guid')?.textContent?.trim() || '';
+        const title = item.querySelector('title')?.textContent?.trim() || '';
+        const id = guid || title.match(/\(([^()]+\/[^()]+)\)\s*$/)?.[1] || '';
+
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+
+        let name = title || id;
+        if (name.endsWith(`(${id})`)) {
+            name = name.slice(0, -(id.length + 2)).trim();
+        }
+
+        const description = item.querySelector('description')?.textContent?.trim() || '';
+        models.push({
+            id: id,
+            name: name || id,
+            description: description
+        });
+    });
+
+    return models
+        .filter(isRssImageOutputModel)
+        .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function renderModelOptions(models) {
@@ -408,7 +455,7 @@ async function refreshAvailableModels({ showSuccessToast = false } = {}) {
     setModelOptionsMessage('Loading models...');
 
     try {
-        const response = await fetch('https://openrouter.ai/api/v1/models', {
+        const response = await fetch('https://openrouter.ai/api/v1/models?use_rss=true', {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${state.apiKey}`
@@ -416,18 +463,14 @@ async function refreshAvailableModels({ showSuccessToast = false } = {}) {
         });
 
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error?.message || `Failed to load models (${response.status})`);
+            throw new Error(`Failed to load models (${response.status})`);
         }
 
-        const data = await response.json();
-        const rawModels = Array.isArray(data?.data) ? data.data : [];
-        const imageModels = rawModels
-            .filter(isImageOutputModel)
-            .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+        const rssText = await response.text();
+        const rssModels = parseModelsFromRss(rssText);
 
         MODEL_CONFIGS = {};
-        state.availableModels = imageModels.map((model) => {
+        state.availableModels = rssModels.map((model) => {
             const config = buildModelConfig(model);
             MODEL_CONFIGS[config.id] = config;
             return config;
