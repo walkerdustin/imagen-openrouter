@@ -36,7 +36,7 @@
             </div>
 
             <!-- Model Selection -->
-            <div class="config-section">
+            <div class="config-section" id="modelSection">
                 <h3>Model</h3>
                 <div class="custom-select" id="modelSelectContainer">
                     <div class="custom-select-trigger" id="modelSelectTrigger">
@@ -47,9 +47,16 @@
                         <div class="custom-select-option" data-disabled="true">Save API key to load models</div>
                     </div>
                 </div>
+                <div class="model-loading-status" id="modelLoadingStatus" style="display: none;">
+                    <div class="model-loading-spinner"></div>
+                    <span class="model-loading-text" id="modelLoadingText">Loading models...</span>
+                    <div class="model-loading-bar">
+                        <div class="model-loading-bar-fill" id="modelLoadingBarFill"></div>
+                    </div>
+                </div>
             </div>
 
-            <!-- Image Quality (Gemini specific) -->
+            <!-- Image Size -->
             <div class="config-section" id="geminiOptions">
                 <h3>Image Size</h3>
                 <div class="button-group">
@@ -66,9 +73,13 @@
                     <button class="btn-aspect active" data-ratio="1:1">1:1</button>
                     <button class="btn-aspect" data-ratio="16:9">16:9</button>
                     <button class="btn-aspect" data-ratio="9:16">9:16</button>
+                    <button class="btn-aspect" data-ratio="21:9">21:9</button>
                     <button class="btn-aspect" data-ratio="4:3">4:3</button>
                     <button class="btn-aspect" data-ratio="3:4">3:4</button>
+                    <button class="btn-aspect" data-ratio="5:4">5:4</button>
+                    <button class="btn-aspect" data-ratio="4:5">4:5</button>
                     <button class="btn-aspect" data-ratio="3:2">3:2</button>
+                    <button class="btn-aspect" data-ratio="2:3">2:3</button>
                 </div>
             </div>
 

@@ -112,6 +112,9 @@ const elements = {
     modelSelectValue: document.getElementById('modelSelectValue'),
     modelSelectOptions: document.getElementById('modelSelectOptions'),
     geminiOptions: document.getElementById('geminiOptions'),
+    modelLoadingStatus: document.getElementById('modelLoadingStatus'),
+    modelLoadingText: document.getElementById('modelLoadingText'),
+    modelLoadingBarFill: document.getElementById('modelLoadingBarFill'),
     apiKey: document.getElementById('apiKey'),
     saveApiKey: document.getElementById('saveApiKey'),
     imageCount: document.getElementById('imageCount'),
@@ -332,35 +335,17 @@ function setupEventListeners() {
     });
 }
 
-function buildModelConfig(model) {
+function buildModelConfig(model, endpointData) {
     const id = model.id || '';
-    const lowerId = id.toLowerCase();
-    const isGemini = id.includes('gemini');
-    const supportsImageInput = isGemini || lowerId.startsWith('openai/gpt-5-image');
+    const inputModalities = endpointData?.architecture?.input_modalities || [];
+    const outputModalities = endpointData?.architecture?.output_modalities || [];
 
     return {
         id: id,
         name: model.name || id,
-        supportsImageSize: isGemini,
-        supportsAspectRatio: true,
-        supportsImageInput: supportsImageInput,
-        maxReferences: isGemini && id.includes('gemini-3-pro') ? 14 : (supportsImageInput ? 1 : 0)
+        supportsImageInput: inputModalities.includes('image'),
+        outputsImage: outputModalities.includes('image')
     };
-}
-
-function isRssImageOutputModel(model) {
-    const searchable = `${model.name || ''} ${model.description || ''}`.toLowerCase();
-    const imageSignals = [
-        'text-to-image',
-        'image generation',
-        'image editing',
-        'image model',
-        'image output',
-        'generate images',
-        'generating images',
-        'megapixel'
-    ];
-    return imageSignals.some((signal) => searchable.includes(signal));
 }
 
 function parseModelsFromRss(rssText) {
@@ -386,17 +371,31 @@ function parseModelsFromRss(rssText) {
             name = name.slice(0, -(id.length + 2)).trim();
         }
 
-        const description = item.querySelector('description')?.textContent?.trim() || '';
-        models.push({
-            id: id,
-            name: name || id,
-            description: description
-        });
+        models.push({ id, name: name || id });
     });
 
-    return models
-        .filter(isRssImageOutputModel)
-        .sort((a, b) => a.name.localeCompare(b.name));
+    return models;
+}
+
+async function fetchModelEndpoint(modelId) {
+    const response = await fetch(`https://openrouter.ai/api/v1/models/${modelId}/endpoints`, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${state.apiKey}` }
+    });
+    if (!response.ok) return null;
+    const json = await response.json();
+    return json?.data || null;
+}
+
+function showModelLoading(text, progress) {
+    elements.modelLoadingStatus.style.display = 'flex';
+    elements.modelLoadingText.textContent = text;
+    elements.modelLoadingBarFill.style.width = `${Math.round(progress)}%`;
+}
+
+function hideModelLoading() {
+    elements.modelLoadingStatus.style.display = 'none';
+    elements.modelLoadingBarFill.style.width = '0%';
 }
 
 function renderModelOptions(models) {
@@ -448,18 +447,18 @@ async function refreshAvailableModels({ showSuccessToast = false } = {}) {
         state.selectedModel = '';
         elements.modelSelectValue.textContent = 'Save API key to load models';
         setModelOptionsMessage('Save API key to load models');
+        hideModelLoading();
         updateGeminiOptionsVisibility();
         return;
     }
 
     setModelOptionsMessage('Loading models...');
+    showModelLoading('Fetching model catalog...', 0);
 
     try {
         const response = await fetch('https://openrouter.ai/api/v1/models?use_rss=true', {
             method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${state.apiKey}`
-            }
+            headers: { 'Authorization': `Bearer ${state.apiKey}` }
         });
 
         if (!response.ok) {
@@ -468,12 +467,52 @@ async function refreshAvailableModels({ showSuccessToast = false } = {}) {
 
         const rssText = await response.text();
         const rssModels = parseModelsFromRss(rssText);
+        const total = rssModels.length;
+
+        showModelLoading(`Checking capabilities... (0/${total})`, 0);
+
+        let completed = 0;
+        const CONCURRENCY = 15;
+        const imageModels = [];
+
+        const processModel = async (model) => {
+            try {
+                const endpointData = await fetchModelEndpoint(model.id);
+                const config = buildModelConfig(model, endpointData);
+                if (config.outputsImage) {
+                    imageModels.push(config);
+                }
+            } catch (e) {
+                console.warn(`Skipping ${model.id}:`, e.message);
+            } finally {
+                completed++;
+                showModelLoading(
+                    `Checking capabilities... (${completed}/${total})`,
+                    (completed / total) * 100
+                );
+            }
+        };
+
+        const queue = [...rssModels];
+        const runBatch = async () => {
+            while (queue.length > 0) {
+                const model = queue.shift();
+                await processModel(model);
+            }
+        };
+
+        const workers = [];
+        for (let i = 0; i < Math.min(CONCURRENCY, total); i++) {
+            workers.push(runBatch());
+        }
+        await Promise.all(workers);
+
+        imageModels.sort((a, b) => a.name.localeCompare(b.name));
 
         MODEL_CONFIGS = {};
-        state.availableModels = rssModels.map((model) => {
-            const config = buildModelConfig(model);
+        state.availableModels = imageModels;
+        imageModels.forEach((config) => {
             MODEL_CONFIGS[config.id] = config;
-            return config;
         });
 
         renderModelOptions(state.availableModels);
@@ -490,6 +529,8 @@ async function refreshAvailableModels({ showSuccessToast = false } = {}) {
             updateGeminiOptionsVisibility();
         }
 
+        hideModelLoading();
+
         if (showSuccessToast) {
             showToast(`Loaded ${state.availableModels.length} image model(s)`, 'success');
         }
@@ -499,6 +540,7 @@ async function refreshAvailableModels({ showSuccessToast = false } = {}) {
         state.availableModels = [];
         elements.modelSelectValue.textContent = 'Failed to load models';
         setModelOptionsMessage('Failed to load models');
+        hideModelLoading();
         updateGeminiOptionsVisibility();
         showToast(`Could not load models: ${error.message}`, 'error');
     }
@@ -795,21 +837,14 @@ async function generateSingleImage(prompt, modelConfig) {
                 role: 'user',
                 content: content.length === 1 ? prompt : content
             }
-        ]
+        ],
+        modalities: ['image'],
+        image_config: {
+            aspect_ratio: state.aspectRatio
+        }
     };
 
-    // Add Gemini-specific options
-    if (modelConfig.supportsImageSize && state.selectedModel.includes('gemini')) {
-        requestBody.image_config = {
-            image_size: state.imageQuality.toLowerCase(),
-            aspect_ratio: state.aspectRatio
-        };
-    }
-
-    // Add aspect ratio for other models
-    if (modelConfig.supportsAspectRatio && !state.selectedModel.includes('gemini')) {
-        requestBody.aspect_ratio = state.aspectRatio;
-    }
+    requestBody.image_config.image_size = state.imageQuality.toLowerCase();
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
@@ -1381,8 +1416,7 @@ function downloadCurrentImage() {
 
 // ===== UI Helpers =====
 function updateGeminiOptionsVisibility() {
-    const isGemini = Boolean(state.selectedModel && state.selectedModel.includes('gemini'));
-    elements.geminiOptions.style.display = isGemini ? 'flex' : 'none';
+    elements.geminiOptions.style.display = 'flex';
 }
 
 function showToast(message, type = 'info') {
